@@ -1,0 +1,30 @@
+# ROMs and save files
+*.nds
+*.gba
+*.sav
+
+# Extracted game data
+/rom/
+/data/
+/overlay/
+/output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
