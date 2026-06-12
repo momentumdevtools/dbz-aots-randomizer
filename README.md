@@ -92,7 +92,7 @@ If you want to support our reverse-engineering efforts, read our technical dev-l
 pip install pyinstaller customtkinter ndspy
 
 python -m PyInstaller --onedir --windowed \
-  --name DBZ_AotS_Randomizer_v5 \
+  --name DBZ_AotS_Randomizer_v1.1.0 \
   --add-data="path/to/customtkinter;customtkinter" \
   --collect-all=ndspy \
   randomizer/gui.py
