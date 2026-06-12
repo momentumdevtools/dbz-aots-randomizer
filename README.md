@@ -14,7 +14,7 @@ Have a look at the [Release page](https://github.com/momentumdevtools/dbz-aots-r
 
 1. Download the latest release `.zip` from [Releases](https://github.com/momentumdevtools/dbz-aots-randomizer/releases)
 2. Extract the zip (keep the folder structure intact!)
-3. Run `DBZ_AotS_Randomizer_v5.exe`
+3. Run `DBZ_AotS_Randomizer_v1.1.0.exe`
 4. Select your ROM, configure settings, click **Randomize!**
 
 > **Important:** The `.exe` must stay in the same folder as `_internal/`. Do not move it out of the extracted directory.
@@ -44,8 +44,6 @@ python randomizer/gui.py
 | **Shop Items** | Shuffle / Chaos | Randomize shop inventory and prices |
 | **XP Rewards** | Multiplier | Scale XP, Zeni, and AP rewards |
 | **Resistances** | Chaos | Randomize enemy elemental/status resistances |
-| **Music Shuffle** | Shuffle / Chaos | Shuffle background music tracks |
-| **Palette** | Shift / Random / Chaos | Recolor enemy sprites |
 | **Presets** | 5 built-in | Quick configurations for common playstyles |
 
 ---
@@ -86,7 +84,7 @@ If you have problems using the randomizer, it could be because of a bad ROM dump
 ---
 
 ## Support the Development
-If you want to support our reverse-engineering efforts, read our technical Ghidra dev-logs, or get early access to beta builds, check out our [Patreon](https://www.patreon.com/momentumdevtools/).
+If you want to support our reverse-engineering efforts, read our technical dev-logs, or get early access to beta builds, check out our [Patreon](https://www.patreon.com/momentumdevtools/).
 
 ## Building from Source
 
