@@ -73,8 +73,19 @@ class RomBuilder:
 
         original_size = len(bdat_bytes)
 
-        # Step 3: Initialize RNG and run randomizers
-        self._log(f"\n[3/5] Randomizing (seed={self.config.seed})...")
+        # Step 3: Merge eneEff + bossEff and patch ARM9
+        self._log("\n[3/6] Merging eneEff/bossEff & patching ARM9...")
+        try:
+            from .arm9_eff_merger import apply_eff_merge
+            if apply_eff_merge(self._rom, self._log):
+                self._log("  eneEff/bossEff merge complete")
+            else:
+                self._log("  WARNING: eneEff/bossEff merge failed")
+        except Exception as e:
+            self._log(f"  WARNING: eneEff/bossEff merge skipped: {e}")
+
+        # Step 4: Initialize RNG and run randomizers
+        self._log(f"\n[4/6] Randomizing (seed={self.config.seed})...")
         self._rng = GameRNG(self.config.seed)
         writer = BdatWriter(bdat)
 
@@ -82,8 +93,8 @@ class RomBuilder:
         self._log(f"  Randomizers executed: {randomizers_run}")
         self._log(f"  Total cells patched: {writer.patch_count}")
 
-        # Step 4: Patch BDAT back into ROM
-        self._log("\n[4/5] Patching ROM...")
+        # Step 5: Patch BDAT back into ROM
+        self._log("\n[5/6] Patching ROM...")
         patched_bdat = writer.build()
 
         assert len(patched_bdat) == original_size, (
@@ -133,14 +144,14 @@ class RomBuilder:
             except Exception as e:
                 self._log(f"  Warning: Could not patch {loc}: {e}")
 
-        # Step 5: Save
+        # Step 6: Save
         output_path = self.config.output_path or self.config.default_output_path
         # Ensure output dir exists
         output_dir = os.path.dirname(output_path)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-        self._log(f"\n[5/5] Saving ROM...")
+        self._log(f"\n[6/6] Saving ROM...")
         rom_size = self._rom.save(output_path)
 
         elapsed = time.time() - start_time
@@ -186,6 +197,8 @@ class RomBuilder:
                     "skip_bosses": self.config.encounter_shuffle.skip_bosses,
                     "available_chrs": available_chrs,
                     "include_heroes": self.config.encounter_shuffle.include_heroes,
+                    "scale_to_area": self.config.encounter_shuffle.scale_to_area,
+                    "force_enemy": self.config.encounter_shuffle.force_enemy,
                 })
                 randomizer.randomize(bdat, writer)
                 for line in randomizer.get_log():
@@ -269,22 +282,22 @@ class RomBuilder:
             except ImportError as e:
                 self._log(f"  [SKIP] XP reward randomizer not available: {e}")
 
-        # Item Randomizer
-        if self.config.items.enabled:
-            self._log("\n  --- Items ---")
+        # Shop Item Randomizer
+        if self.config.shop_items.enabled:
+            self._log("\n  --- Shop Items ---")
             try:
-                from ..randomizers.items import ItemRandomizer
-                rng = self._rng.fork("items")
-                randomizer = ItemRandomizer(rng, {
-                    "mode": self.config.items.mode,
-                    "price_variance": self.config.items.price_variance,
+                from ..randomizers.shop_items import ShopItemRandomizer
+                rng = self._rng.fork("shop_items")
+                randomizer = ShopItemRandomizer(rng, {
+                    "mode": self.config.shop_items.mode,
+                    "price_variance": self.config.shop_items.price_variance,
                 })
                 randomizer.randomize(bdat, writer)
                 for line in randomizer.get_log():
                     self._log(f"    {line}")
                 count += 1
             except ImportError as e:
-                self._log(f"  [SKIP] Item randomizer not available: {e}")
+                self._log(f"  [SKIP] Shop item randomizer not available: {e}")
 
         # Player Stats Randomizer
         if self.config.player_stats.enabled:
@@ -420,18 +433,24 @@ class RomBuilder:
     def _apply_eff_swaps(self, chr_map: dict, bdat) -> None:
         """Swap eneEff.bin entries to match CHR sprite swaps.
 
-        eneEff.bin structure:
+        eneEff.bin structure (after arm9_eff_merger):
             - 8-byte header
-            - 173 entries of 600 bytes each (indexed by enemy_param row)
+            - 173 enemy entries of 600 bytes each (indexed by enemy_param row)
+            - 82 boss entries of 600 bytes each (indexed by boss_param row)
 
         When enemy at row X now shows sprite from row Y (via CHR swap),
         row X's effect entry must also contain row Y's effects.
+
+        When a BOSS CHR is placed into an enemy slot, the boss's effect
+        entry (from the merged boss region at index 173+) is copied into
+        the enemy's eneEff slot.
         """
         import struct
 
         ENE_EFF_PATH = "btl/ene/eneEff.bin"
         HEADER_SIZE = 8
         ENTRY_SIZE = 600
+        ENE_COUNT = 173  # entries 0-172 are enemy_param, 173+ are boss_param
 
         try:
             eff_data = self._rom.get_file(ENE_EFF_PATH)
@@ -442,7 +461,7 @@ class RomBuilder:
         num_entries = (len(eff_data) - HEADER_SIZE) // ENTRY_SIZE
         self._log(f"    --- eneEff.bin: {num_entries} entries, {len(eff_data)} bytes ---")
 
-        # Build file -> [row_indices] mapping from the BDAT
+        # Build file -> [row_indices] mapping from enemy_param
         table = bdat.get_table("enemy_param")
         if table is None:
             return
@@ -455,22 +474,40 @@ class RomBuilder:
                     file_to_rows[file_name] = []
                 file_to_rows[file_name].append(idx)
 
-        # Build row-level swap plan: for each row of dest_file, take the
-        # eneEff entry from the corresponding row of source_file.
-        # row_swap_plan: list of (dest_row, source_row)
+        # Build boss file -> first boss_param row index mapping
+        boss_table = bdat.get_table("boss_param")
+        boss_file_to_row: dict[str, int] = {}
+        if boss_table is not None:
+            for idx, row in enumerate(boss_table.rows):
+                file_name = row.get("file", "")
+                if file_name and file_name not in boss_file_to_row:
+                    boss_file_to_row[file_name] = idx
+
+        # Build row-level swap plan
+        # row_swap_plan: list of (dest_row, source_merged_index)
         row_swap_plan = []
         for dest_file, source_file in chr_map.items():
             if dest_file == source_file:
                 continue
             dest_rows = file_to_rows.get(dest_file, [])
-            source_rows = file_to_rows.get(source_file, [])
-            if not dest_rows or not source_rows:
+            if not dest_rows:
                 continue
 
-            for i, dest_row in enumerate(dest_rows):
-                source_row = source_rows[min(i, len(source_rows) - 1)]
-                if dest_row < num_entries and source_row < num_entries:
-                    row_swap_plan.append((dest_row, source_row))
+            # Check if source is a regular enemy or a boss
+            source_rows = file_to_rows.get(source_file, [])
+            if source_rows:
+                # Enemy → Enemy: use enemy eneEff index directly
+                for i, dest_row in enumerate(dest_rows):
+                    source_row = source_rows[min(i, len(source_rows) - 1)]
+                    if dest_row < num_entries and source_row < num_entries:
+                        row_swap_plan.append((dest_row, source_row))
+            elif source_file in boss_file_to_row:
+                # Boss → Enemy: SKIP eneEff swap!
+                # Boss effect entries use different combat system semantics.
+                # The enemy keeps its original eneEff (matching its own attacks)
+                # and just gets the boss's sprite (CHR swap only = skin only).
+                self._log(f"      Boss→Enemy: {source_file} → SKIP eneEff "
+                          f"(skin only, {len(dest_rows)} enemy slots)")
 
         if not row_swap_plan:
             self._log("    No eneEff entries to swap.")
@@ -557,10 +594,12 @@ class RomBuilder:
                       e.g., {"ene005_01": "hero_raditz"}
             bdat: The parsed BDAT file (for file->row mapping)
 
-        Two things happen for each hero assignment:
+        Three things happen for each hero assignment:
         1. The boss's CHR file content is copied into the enemy's CHR slot
-        2. The boss's bossEff.bin animation entry is copied into eneEff.bin
+        2. The boss's bossEff animation entry is copied into eneEff.bin
            at the rows that reference the destination enemy file
+        3. All OTHER boss effect entries in merged eneEff are also overwritten
+           so story boss fights use the forced boss's effects
         """
         import struct
         from ..randomizers.encounter_shuffle import HERO_SPRITES
@@ -592,7 +631,7 @@ class RomBuilder:
             except KeyError:
                 self._log(f"      WARNING: {src_path} not found")
 
-        # Build file->rows mapping for eneEff patching
+        # Build file->rows mapping for eneEff patching (enemy_param only)
         table = bdat.get_table("enemy_param")
         file_to_rows: dict[str, list[int]] = {}
         if table:
@@ -603,8 +642,25 @@ class RomBuilder:
                         file_to_rows[f] = []
                     file_to_rows[f].append(idx)
 
+        # Build boss file->rows mapping for bossEff patching
+        boss_table = bdat.get_table("boss_param")
+        boss_file_to_rows: dict[str, list[int]] = {}
+        if boss_table:
+            for idx, row in enumerate(boss_table.rows):
+                f = row.get("file", "")
+                if f:
+                    if f not in boss_file_to_rows:
+                        boss_file_to_rows[f] = []
+                    boss_file_to_rows[f].append(idx)
+
         chr_injected = 0
         eff_injected = 0
+        boss_eff_injected = 0
+
+        # Determine the source boss's merged eneEff entry (used as template)
+        # All hero assignments point to the same boss in force mode
+        source_boss_entry = None
+        source_boss_idx = None
 
         for dest_ene_file, hero_key in hero_map.items():
             hero_info = HERO_SPRITES.get(hero_key)
@@ -619,38 +675,28 @@ class RomBuilder:
                 try:
                     self._rom.set_file(dest_path, chr_data)
                     chr_injected += 1
-                    self._log(
-                        f"      {dest_ene_file}.chr <- "
-                        f"{hero_info['ene_file']}.chr "
-                        f"({len(chr_data)} bytes) 🦸"
-                    )
                 except Exception as e:
                     self._log(f"      ERROR writing CHR: {e}")
 
-            # 2. Copy bossEff entry into eneEff slots
+            # 2. Get boss effect entry for boss slot patching (step 3).
+            # We do NOT patch enemy_param eneEff slots here because regular
+            # enemies keep their own attacks, which need their original eneEff.
             boss_idx = hero_info.get("boss_idx")
-            if (ene_eff is not None and boss_eff is not None
-                    and boss_idx is not None):
-                boss_start = HEADER_SIZE + boss_idx * ENTRY_SIZE
-                boss_entry = boss_eff[boss_start:boss_start + ENTRY_SIZE]
+            if (ene_eff is not None and boss_idx is not None):
+                ENE_COUNT = 173
+                merged_idx = ENE_COUNT + boss_idx
+                src_start = HEADER_SIZE + merged_idx * ENTRY_SIZE
+                src_entry = ene_eff[src_start:src_start + ENTRY_SIZE]
 
-                if len(boss_entry) == ENTRY_SIZE:
-                    # Find all enemy_param rows that reference this dest file
-                    dest_rows = file_to_rows.get(dest_ene_file, [])
-                    for row_idx in dest_rows:
-                        ene_start = HEADER_SIZE + row_idx * ENTRY_SIZE
-                        if ene_start + ENTRY_SIZE <= len(ene_eff):
-                            ene_eff[ene_start:ene_start + ENTRY_SIZE] = boss_entry
-                            eff_injected += 1
+                if len(src_entry) == ENTRY_SIZE:
+                    if source_boss_entry is None:
+                        source_boss_entry = bytes(src_entry)
+                        source_boss_idx = boss_idx
 
-        # Write modified eneEff back
-        if ene_eff is not None and eff_injected > 0:
-            try:
-                self._rom.set_file(ENE_EFF_PATH, bytes(ene_eff))
-                self._log(f"    eneEff.bin: {eff_injected} entries "
-                          f"overwritten with bossEff data")
-            except Exception as e:
-                self._log(f"    ERROR writing eneEff.bin: {e}")
+        # NOTE: We do NOT overwrite bossEff entries in the merged eneEff.
+        # Boss scripts are tightly coupled to their own bossEff animations.
+        # Swapping them causes crashes and visual glitches (wrong positions,
+        # buff/debuff instead of attacks). Bosses get cosmetic-only swaps.
 
         self._log(f"    Hero sprites injected: {chr_injected}")
 

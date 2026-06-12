@@ -55,6 +55,11 @@ class BdatWriter:
         self._data = bdat.raw_data  # already a mutable bytearray
         self._patch_count = 0
 
+    @property
+    def bdat(self) -> BdatFile:
+        """Access the underlying BdatFile for reading tables."""
+        return self._bdat
+
     def set_value(self, table_name: str, row_idx: int,
                   col_name: str, value: int) -> bool:
         """
@@ -91,6 +96,54 @@ class BdatWriter:
             return False
 
         return self._write_cell(table, row_idx, col, value)
+
+    def copy_string_ref(self, table_name: str, col_name: str,
+                        src_row: int, dest_row: int) -> bool:
+        """Copy a string column's raw u16 offset from one row to another.
+
+        This safely re-points a string column to an existing string
+        in the pool. The string pool itself is NOT modified.
+
+        Args:
+            table_name: Table name
+            col_name:   String column name (must be type 7)
+            src_row:    Source row index (has the string we want)
+            dest_row:   Destination row index (gets the same string)
+
+        Returns:
+            True if copied successfully.
+        """
+        table = self._bdat.get_table(table_name)
+        if table is None:
+            return False
+
+        col = table.get_column(col_name)
+        if col is None or not col.is_string:
+            return False
+
+        if not (0 <= src_row < table.num_rows and
+                0 <= dest_row < table.num_rows):
+            return False
+
+        # Read the raw u16 offset from source row
+        src_abs = (table.file_offset + table.data_offset +
+                   src_row * table.row_size + col.row_offset)
+        dst_abs = (table.file_offset + table.data_offset +
+                   dest_row * table.row_size + col.row_offset)
+
+        if src_abs + 2 > len(self._data) or dst_abs + 2 > len(self._data):
+            return False
+
+        # Copy the 2-byte string offset
+        self._data[dst_abs:dst_abs + 2] = self._data[src_abs:src_abs + 2]
+
+        # Update in-memory row data
+        if (src_row < len(table.rows) and dest_row < len(table.rows)
+                and col.name in table.rows[src_row]):
+            table.rows[dest_row][col.name] = table.rows[src_row][col.name]
+
+        self._patch_count += 1
+        return True
 
     def patch_row(self, table_name: str, row_idx: int,
                   values: Dict[str, int]) -> int:

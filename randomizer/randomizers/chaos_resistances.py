@@ -199,9 +199,25 @@ class ChaosResistanceRandomizer(BaseRandomizer):
                 writer.set_value(table_name, row_idx, col, status_values[col])
 
             # --- Randomize element resistances ---
+            elem_values = {}
             for col in ELEMENT_RESIST_COLS:
-                new_val = self.rng.randint(ELEMENT_MIN, ELEMENT_MAX)
-                writer.set_value(table_name, row_idx, col, new_val)
+                elem_values[col] = self.rng.randint(ELEMENT_MIN, ELEMENT_MAX)
+
+            # Sanity guard: at most ONE primary damage type (physics,
+            # slash, blast) may absorb (>100).  If multiple absorb,
+            # keep only one random absorber and clamp the rest to 100.
+            PRIMARY_DMG = ('physics', 'slash', 'blast')
+            absorbers = [c for c in PRIMARY_DMG if elem_values.get(c, 0) > 100]
+            if len(absorbers) > 1:
+                # Pick one lucky absorber to keep
+                keep = absorbers[self.rng.randint(0, len(absorbers) - 1)]
+                for c in absorbers:
+                    if c != keep:
+                        elem_values[c] = self.rng.randint(
+                            ELEMENT_MIN, 100)
+
+            for col in ELEMENT_RESIST_COLS:
+                writer.set_value(table_name, row_idx, col, elem_values[col])
 
             changed += 1
 
@@ -219,12 +235,17 @@ class ChaosResistanceRandomizer(BaseRandomizer):
 
         Status:  new_val = 100 - old_val, clamped [0, 100]
         Element: new_val = 200 - old_val, clamped [0, 200]
+
+        Sanity guard: at most one of physics/slash/blast may absorb.
         """
         rows = table.rows
         changed = 0
 
+        PRIMARY_DMG = ('physics', 'slash', 'blast')
+
         for row_idx, row in enumerate(rows):
             any_change = False
+            elem_values = {}
 
             for col in ALL_RESIST_COLS:
                 old_val = row.get(col, 0)
@@ -235,11 +256,29 @@ class ChaosResistanceRandomizer(BaseRandomizer):
                 else:  # element
                     new_val = 200 - old_val
                     new_val = max(ELEMENT_MIN, min(ELEMENT_MAX, new_val))
-
-                writer.set_value(table_name, row_idx, col, new_val)
+                    elem_values[col] = new_val
 
                 if old_val != new_val:
                     any_change = True
+
+            # Sanity guard: at most ONE primary damage type may absorb
+            absorbers = [c for c in PRIMARY_DMG
+                         if elem_values.get(c, 0) > 100]
+            if len(absorbers) > 1:
+                keep = absorbers[self.rng.randint(0, len(absorbers) - 1)]
+                for c in absorbers:
+                    if c != keep:
+                        elem_values[c] = 100
+
+            # Write all values
+            for col in STATUS_RESIST_COLS:
+                old_val = row.get(col, 0)
+                new_val = 100 - old_val
+                new_val = max(STATUS_MIN, min(STATUS_MAX, new_val))
+                writer.set_value(table_name, row_idx, col, new_val)
+
+            for col in ELEMENT_RESIST_COLS:
+                writer.set_value(table_name, row_idx, col, elem_values[col])
 
             if any_change:
                 changed += 1

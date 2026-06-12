@@ -63,6 +63,24 @@ IDENTITY_COLS = (
     "atr_fire", "atr_thunder", "atr_ice",
 )
 
+# Visual identity: travels with the sprite (name, attacks, palette, drops, resists)
+VISUAL_COLS = (
+    "name_id",
+    "atk1", "atk2", "atk3", "atk4",
+    "atk1_pow", "atk2_pow", "atk3_pow", "atk4_pow",
+    "palno",
+    "item1", "item2", "item3", "item4",
+    "sleep", "bind", "poison", "dark",
+    "stan", "panic", "freez", "dead", "carrot",
+    "physics", "slash", "blast",
+    "atr_fire", "atr_thunder", "atr_ice",
+)
+
+# Combat stats: STAY at the slot (scaled to match area difficulty)
+# These ensure a Lv55 enemy placed in a Lv5 slot becomes Lv5-strength.
+STAT_COLS = ("lv", "hp", "mp", "str", "def", "rec", "tec", "agi", "luc")
+REWARD_COLS = ("power", "zeni", "exp", "ap")
+
 # NOT swapped in BDAT:
 #   file   — stays the same (we swap the .chr file CONTENTS instead)
 #   size   — formation positioning (we group by size instead)
@@ -133,6 +151,7 @@ class EncounterShuffleRandomizer(BaseRandomizer):
         skip_bosses:     bool (default True) — never swap boss-immune enemies
         available_chrs:  set[str] — set of file names that have .chr files
         include_heroes:  bool (default False) — add player sprites to pool
+        scale_to_area:   bool (default True) — scale stats to area difficulty
     """
 
     def __init__(self, rng: GameRNG, config: dict):
@@ -141,6 +160,8 @@ class EncounterShuffleRandomizer(BaseRandomizer):
         self.respect_tiers: bool = config.get("respect_tiers", True)
         self.skip_bosses: bool = config.get("skip_bosses", True)
         self.include_heroes: bool = config.get("include_heroes", False)
+        self.scale_to_area: bool = config.get("scale_to_area", True)
+        self.force_enemy: str = config.get("force_enemy", "")
         # Set of sprite filenames that have actual .chr files in the ROM
         self._available_chrs: set = config.get("available_chrs", set())
         # Result: sprite file content swap mapping
@@ -156,14 +177,179 @@ class EncounterShuffleRandomizer(BaseRandomizer):
             self._log(f"WARNING: Table '{TABLE_NAME}' not found")
             return
 
-        if self.mode == "vanilla":
+        if self.mode == "vanilla" and not self.force_enemy:
             self._log("Mode is 'vanilla' — no changes.")
+            return
+
+        # Force Enemy mode: replace ALL enemies with one specific sprite
+        if self.force_enemy:
+            self._force_all_enemies(table, writer)
+            self._log(f"=== EncounterShuffleRandomizer complete (force) ===")
             return
 
         if self.mode in ("shuffle_tiered", "shuffle_wild"):
             self._shuffle_identities(table, writer)
 
         self._log(f"=== EncounterShuffleRandomizer complete ===")
+
+    def _force_all_enemies(self, table: BdatTable,
+                           writer: BdatWriter) -> None:
+        """Replace ALL enemies (regular + story bosses) with a single sprite.
+
+        Swaps visual identity (name, attacks, palette, drops, resists).
+        Stats stay at original values so each encounter keeps its
+        original difficulty.
+        """
+        force_file = self.force_enemy
+        self._log(f"  FORCE MODE: replacing all enemies with '{force_file}'")
+
+        bdat = writer.bdat  # Access the full BDAT file
+
+        # Find the source in enemy_param first
+        source_row = None
+        for idx, row in enumerate(table.rows):
+            if row.get("file", "") == force_file:
+                source_row = row
+                break
+
+        # Check boss_param if not in enemy_param
+        hero_info = None
+        boss_source_row = None
+        boss_table = bdat.get_table("boss_param")
+        if source_row is None:
+            for hero_key, info in HERO_SPRITES.items():
+                if info["ene_file"] == force_file:
+                    hero_info = info
+                    self._log(f"  Source is boss/hero: {hero_key}")
+                    break
+            # Read actual values from boss_param (not HERO_SPRITES weights!)
+            if boss_table is not None:
+                for idx, row in enumerate(boss_table.rows):
+                    if row.get("file", "") == force_file:
+                        boss_source_row = row
+                        self._log(f"  Found source in boss_param[{idx}]")
+                        break
+
+        if source_row is None and hero_info is None and boss_source_row is None:
+            self._log(f"  ERROR: Could not find source enemy '{force_file}'")
+            return
+
+        # Collect visual identity from source
+        if source_row is not None:
+            src_visual = {col: source_row.get(col, 0) for col in VISUAL_COLS}
+        elif boss_source_row is not None:
+            # Boss — read ACTUAL values from boss_param BDAT table.
+            # Include boss-specific fields beyond VISUAL_COLS.
+            BOSS_EXTRA = ("atk5", "atk6", "atk5_pow", "atk6_pow",
+                          "size", "shadow")
+            src_visual = {col: boss_source_row.get(col, 0)
+                          for col in (*VISUAL_COLS, *BOSS_EXTRA)}
+            self._log(f"  Boss attacks: atk1={src_visual.get('atk1')}, "
+                      f"atk2={src_visual.get('atk2')}, "
+                      f"atk3={src_visual.get('atk3')}, "
+                      f"atk4={src_visual.get('atk4')}, "
+                      f"atk5={src_visual.get('atk5')}, "
+                      f"atk6={src_visual.get('atk6')}")
+        else:
+            # Fallback: hero_info only (shouldn't reach here if boss_param exists)
+            src_visual = {
+                "name_id": hero_info["name_id"],
+                "palno": 0,
+            }
+            for col in VISUAL_COLS:
+                if col not in src_visual:
+                    src_visual[col] = 0
+
+        # --- Part 1: Replace ALL regular enemies (enemy_param) ---
+        # Only swap COSMETIC fields — NOT attacks!
+        # Boss attacks (atk1-4) use boss combat system semantics.
+        # Writing them into enemy_param causes hit/animation mismatches
+        # because the enemy combat system interprets them differently.
+        # Each enemy keeps its own attacks (matching its own eneEff entry).
+        FORCE_COSMETIC_COLS = (
+            "name_id", "palno",
+            "item1", "item2", "item3", "item4",
+            "sleep", "bind", "poison", "dark",
+            "stan", "panic", "freez", "dead", "carrot",
+            "physics", "slash", "blast",
+            "atr_fire", "atr_thunder", "atr_ice",
+        )
+
+        swapped = 0
+        unique_files = set()
+        for idx, row in enumerate(table.rows):
+            file_name = row.get("file", "")
+            if not file_name or file_name == force_file:
+                continue
+            if self._available_chrs and file_name not in self._available_chrs:
+                continue
+
+            unique_files.add(file_name)
+
+            for col in FORCE_COSMETIC_COLS:
+                old_val = row.get(col, 0)
+                new_val = src_visual.get(col, old_val)
+                if old_val != new_val:
+                    writer.set_value(TABLE_NAME, idx, col, new_val)
+
+            swapped += 1
+
+        # --- Part 2: Replace ALL story bosses (boss_param) ---
+        # Cosmetic swap ONLY. Boss scripts are tightly coupled to their
+        # battle event context (phase triggers, event flags, battle layout).
+        # Swapping attacks/scripts/bossEff causes crashes and glitches.
+        # Bosses LOOK like the forced enemy but FIGHT like their original.
+        BOSS_TABLE = "boss_param"
+        BOSS_COSMETIC_COLS = (
+            "name_id", "palno", "size", "shadow",
+            "item1", "item2", "item3",
+            "sleep", "bind", "poison", "dark",
+            "stan", "panic", "freez", "dead", "carrot",
+            "physics", "slash", "blast",
+            "atr_fire", "atr_thunder", "atr_ice",
+        )
+
+        boss_swapped = 0
+        if boss_table is not None:
+            for idx, row in enumerate(boss_table.rows):
+                file_name = row.get("file", "")
+                if not file_name or file_name == force_file:
+                    continue
+
+                # Add boss CHR files to swap map
+                if file_name not in unique_files:
+                    unique_files.add(file_name)
+
+                # Swap cosmetic identity only — attacks/script stay original
+                for col in BOSS_COSMETIC_COLS:
+                    old_val = row.get(col, 0)
+                    new_val = src_visual.get(col, old_val)
+                    if old_val != new_val:
+                        writer.set_value(BOSS_TABLE, idx, col, new_val)
+
+                # Swap boss CHR file (sprite)
+                self._chr_swap_map[file_name] = force_file
+
+                boss_swapped += 1
+
+        self._log(f"  Replaced {swapped} enemy_param + "
+                  f"{boss_swapped} boss_param rows across "
+                  f"{len(unique_files)} unique sprites")
+
+        # Set up CHR swap for regular enemies
+        for dest_file in unique_files:
+            self._chr_swap_map[dest_file] = force_file
+
+        # If source is a boss/hero, register ALL files for hero CHR injection
+        if hero_info is not None:
+            hero_key = next(
+                k for k, v in HERO_SPRITES.items()
+                if v["ene_file"] == force_file
+            )
+            for dest_file in unique_files:
+                self._hero_assignments[dest_file] = hero_key
+
+        self._log(f"  CHR swap map: {len(self._chr_swap_map)} entries")
 
     def _shuffle_identities(self, table: BdatTable,
                             writer: BdatWriter) -> None:
@@ -352,22 +538,34 @@ class EncounterShuffleRandomizer(BaseRandomizer):
                     }
                     swap_plan.append((idx, profile, old_file, new_file))
             else:
-                # Normal ene->ene swap: full identity copy
+                # Normal ene→ene swap
                 new_rows = all_file_rows.get(new_file, [])
                 if not new_rows:
                     continue
+
+                # Choose which columns to copy based on scaling mode
+                if self.scale_to_area:
+                    # SCALED: Only copy visual identity (name, attacks,
+                    # palette, drops, resistances). Stats stay at the
+                    # slot → difficulty matches the original area.
+                    copy_cols = VISUAL_COLS
+                else:
+                    # UNSCALED: Copy EVERYTHING including stats.
+                    # The enemy keeps its original power → late-game
+                    # enemies in early areas will be extremely tough!
+                    copy_cols = IDENTITY_COLS
 
                 # Snapshot profiles from the SOURCE sprite's rows
                 new_profiles = []
                 for nr_idx in new_rows:
                     profile = {}
-                    for col in IDENTITY_COLS:
+                    for col in copy_cols:
                         if table.get_column(col) is not None:
                             profile[col] = rows[nr_idx].get(col, 0)
                     new_profiles.append(profile)
 
                 for i, idx in enumerate(old_rows):
-                    profile = new_profiles[min(i, len(new_profiles) - 1)]
+                    profile = dict(new_profiles[min(i, len(new_profiles) - 1)])
                     swap_plan.append((idx, profile, old_file, new_file))
 
         # Phase 2: WRITE all profiles (safe — no reads from rows[] after this)
@@ -387,10 +585,11 @@ class EncounterShuffleRandomizer(BaseRandomizer):
                         f"🦸 {new_file}(nid={new_name_id})"
                     )
                 else:
+                    slot_lv = rows[idx].get("lv", 0)
                     self._log(
                         f"    [{idx}] {old_file}(nid={old_name_id}) -> "
                         f"{new_file}(nid={new_name_id}) "
-                        f"lv={profile.get('lv', 0)}"
+                        f"slot_lv={slot_lv}"
                     )
 
         self._log(f"  BDAT identity swaps: {bdat_swaps}")

@@ -44,6 +44,8 @@ class EncounterShuffleConfig:
     skip_bosses: bool = True      # don't swap boss-immune enemies
     tier_width: int = 0           # allow cross-tier swaps (0=strict)
     include_heroes: bool = False  # add player characters as enemy sprites
+    scale_to_area: bool = True    # scale stats to match area (False = original stats, very hard!)
+    force_enemy: str = ""         # if set, replace ALL enemies with this sprite file (debug/fun)
 
 
 @dataclass
@@ -199,6 +201,7 @@ class RandomizerConfig:
                 "skip_bosses": self.encounter_shuffle.skip_bosses,
                 "tier_width": self.encounter_shuffle.tier_width,
                 "include_heroes": self.encounter_shuffle.include_heroes,
+                "force_enemy": self.encounter_shuffle.force_enemy,
             },
             "items": {
                 "enabled": self.items.enabled,
@@ -305,6 +308,7 @@ class RandomizerConfig:
                 skip_bosses=es2.get("skip_bosses", True),
                 tier_width=es2.get("tier_width", 0),
                 include_heroes=es2.get("include_heroes", False),
+                force_enemy=es2.get("force_enemy", ""),
             )
 
         if "items" in d:
