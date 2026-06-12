@@ -1,5 +1,5 @@
 # DBZ: Attack of the Saiyans Randomizer by Momentum DevTools
-![UI Showcase](ui_showcase_1.1.0.png)
+![UI Showcase](ui_showcase_v1.1.0.png)
 
 ### Info
 This project was created to fully randomize the Nintendo DS classic *Dragon Ball Z: Attack of the Saiyans* (2009). Built by reverse-engineering the ARM9 binary and extracting the proprietary `.narc` file system, this tool allows for complete procedural manipulation of encounters, stats, items, and boss logic.
